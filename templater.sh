@@ -38,7 +38,7 @@ USAGE
 }
 
 # echo the message if not in quiet mode
-function echoerr() {
+echoerr() {
     [ "$silent" -ne 1 ] && printf "%s\n" "$*" 1>&2
 }
 
