@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 #
 # Simple templating system that replaces {{VAR}} by the value of $VAR.
@@ -16,7 +16,7 @@
 readonly progname=$(basename $0)
 
 # Display help message
-function getHelp() {
+getHelp() {
     cat << USAGE >&2
 
 Usage: ${progname} [-h] [-d] [-f] [-s] --
@@ -35,11 +35,6 @@ Examples:
     ${progname} test.txt -f my-variables.txt > new-test.txt
 
 USAGE
-}
-
-# echo the message if not in quiet mode
-echoerr() {
-    [ "$silent" -ne 1 ] && printf "%s\n" "$*" 1>&2
 }
 
 # At least one parameter is needed
@@ -131,9 +126,38 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# echo the message if not in quiet mode
+echoerr() {
+    [ "$silent" -ne 1 ] && printf "%s\n" "$*" 1>&2
+}
+
+# Evaluate variable from string
+# Example: MY_VAR=1 eval_var "MY_VAR"   ===>  1
+eval_var() {
+    local var="${1}"
+    eval echo \$"${var}"
+}
+
+# Escape custom characters in a string
+# Example: escape "ab'\c" '\' "'"   ===>  ab\'\\c
+escape() {
+    local content="${1}"
+    shift
+    for char in "$@"; do content="${content//${char}/\\${char}}"; done
+    echo "${content}"
+}
+
+# Evaluate expression
+eval_expr() {
+    local var="${1}"
+    local value="${2}"
+    local escaped="$(escape "${value}" "\\" '"')"
+
+    echo "${var}=\"${escaped}\""
+}
+
 # List of variable in the template file
 vars=$(grep -oE '\{\{\s*[A-Za-z0-9_]+\s*\}\}' "${template}" | sort | uniq | sed -e 's/^{{//' -e 's/}}$//')
-[ -z "$vars" ] && echoerr "Warning: No variable was found in ${template}, syntax is {{VAR}}"
 
 # Load variables from config file
 if [ -f "${configFile}" ]; then
@@ -145,25 +169,45 @@ if [ -f "${configFile}" ]; then
     source $tmpfile
 fi
 
+# array of strings to replace
+declare -a replaces
+replaces=()
+
 # Reads default values defined as {{VAR=value}}
 # They are evaluated, so you can do {{PATH=$HOME}} or {{PATH=$(pwd)}}
 # You can even reference variables defined in the template before
-defaults=$(grep -oE '^\{\{[A-Za-z0-9_]+=.+\}\}' "${template}" | sed -e 's/^{{//' -e 's/}}$//')
+defaults=$(grep -oE '\{\{[A-Za-z0-9_]+=.+\}\}' "${template}" | sed -e 's/^{{//' -e 's/}}$//')
+IFS=$'\n'
 
 # Evaluate default values
 for default in $defaults; do
     # extract var name
     var=$(echo "$default" | grep -oE "^[A-Za-z0-9_]+")
     # evaluate var from global variables or config variables first
-    value=$(eval echo \$"$var")
+    value="$(eval_var "${var}")"
+
     # replace only if var is not set
-    [ -z "$value" ] && eval $default
+    if [ -n "$value" ]; then
+        eval "$(eval_expr "${var}" "${value}")"
+    else
+        eval "${default}"
+    fi
+
+    # remove define line
+    replaces+=("-e")
+    replaces+=("/^{{${var}=/d")
+
+    #
+    vars="${vars} ${var}"
 done
+
+vars="$(echo "${vars}" | tr " " "\n" | sort | uniq)"
 
 # Print and exit
 if [ $printOnly -eq 1 ]; then
     for var in $vars; do
-        echo "$var=$(eval echo \$"$var")"
+        value="$(eval_var "${var}")"
+        echo_var "${var}" "${value}"
     done
     exit 0
 fi
@@ -171,14 +215,24 @@ fi
 # Replace all {{VAR}} by $VAR value
 for var in $vars; do
     # evaluate var from global variables or config variables
-    value=$(eval echo \$"$var")
+    value="$(eval_var "${var}")"
+
     # check for empty value
     [ -z "$value" ] && echoerr "Warning: $var is not defined and no default is set, replacing by empty"
+
     # escape slashes
-    var=$(echo "$var" | sed 's/\//\\\//g');
-    value=$(echo "$value" | sed 's/\//\\\//g');
-    replaces="-e 's/{{\s*$var\s*}}/${value}/g' $replaces"
+    value="$(escape "${value}" "\\" '/' ' ')";
+
+    # replace {{VAR}}
+    replaces+=("-e")
+    replaces+=("s/{{\s*${var}\s*}}/${value}/g")
+    # replace {{VAR=VALUE}}
+    replaces+=("-e")
+    replaces+=("s/{{\s*${var}\s*=\s*.*\s*}}/${value}/g")
+    # replace {{VAR=$VARIABLE}}
+    replaces+=("-e")
+    replaces+=("s/{{\s*${var}\s*=\s*\\$\w*\s*}}/${value}/g")
 done
 
 # Replace all var and remove define line
-eval sed ${replaces:-s,^,,} -e '/^{{.*=.*}}/d' "$template"
+sed "${replaces[@]}" "${template}"
